@@ -76,8 +76,12 @@ void buffer_lock_capture(buffer_lock_t *buf_lock, buffer_t *buf)
   pthread_mutex_lock(&buf_lock->lock);
 
   if (!buf) {
+    LOG_INFO(buf_lock, "buffer_lock_capture called with NULL (clearing buffer, refs=%d, counter=%d)",
+      buf_lock->refs, buf_lock->counter);
     buffer_lock_clear_buffers(buf_lock, now);
   } else if (buf->flags.is_keyframe) {
+    LOG_INFO(buf_lock, "buffer_lock_capture: keyframe received (refs=%d, counter=%d)",
+      buf_lock->refs, buf_lock->counter);
     buffer_lock_set_buffer(buf_lock, buf, now);
   } else if (now - buf_lock->buf_time_us >= buf_lock->frame_interval_ms * 1000) {
     buffer_lock_set_buffer(buf_lock, buf, now);
@@ -107,10 +111,20 @@ buffer_t *buffer_lock_get(buffer_lock_t *buf_lock, int timeout_ms, int *counter)
   if (*counter == buf_lock->counter || !buf_lock->buf) {
     int ret = pthread_cond_timedwait(&buf_lock->cond_wait, &buf_lock->lock, &timeout);
     if (ret == ETIMEDOUT) {
+      LOG_INFO(buf_lock, "Timeout waiting for buffer (waited %dms, refs=%d, counter=%d)",
+        timeout_ms, buf_lock->refs, buf_lock->counter);
       goto ret;
     } else if (ret < 0) {
+      LOG_INFO(buf_lock, "pthread_cond_timedwait failed: %d", ret);
       goto ret;
     }
+  }
+
+  // Check if buffer is still valid after wakeup (could be spurious wakeup or cleared by timeout_us)
+  if (!buf_lock->buf) {
+    LOG_INFO(buf_lock, "Buffer was cleared while waiting (spurious wakeup or cleared, refs=%d)",
+      buf_lock->refs);
+    goto ret;
   }
 
   buf = buf_lock->buf;
@@ -129,6 +143,9 @@ int buffer_lock_write_loop(buffer_lock_t *buf_lock, int nframes, unsigned timeou
   uint64_t deadline_ms = get_monotonic_time_us(NULL, NULL) + DEFAULT_BUFFER_LOCK_GET_TIMEOUT * 1000LL;
   uint64_t frame_stop_ms = get_monotonic_time_us(NULL, NULL) + timeout_ms * 1000LL;
 
+  LOG_INFO(buf_lock, "write_loop started (buf=%p, current_counter=%d, current_refs=%d, nframes=%d)",
+    buf_lock->buf, buf_lock->counter, buf_lock->refs, nframes);
+
   buffer_lock_use(buf_lock, 1);
 
   while (nframes == 0 || frames < nframes) {
@@ -138,6 +155,8 @@ int buffer_lock_write_loop(buffer_lock_t *buf_lock, int nframes, unsigned timeou
 
     buffer_t *buf = buffer_lock_get(buf_lock, 0, &counter);
     if (!buf) {
+      LOG_INFO(buf_lock, "buffer_lock_get returned NULL. frames=%d, counter=%d, timeout=%dms",
+        frames, counter, DEFAULT_BUFFER_LOCK_GET_TIMEOUT);
       goto error;
     }
 

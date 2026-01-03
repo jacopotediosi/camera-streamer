@@ -37,7 +37,11 @@ bool buffer_consumed(buffer_t *buf, const char *who)
     LOG_PERROR(buf, "Non symmetric reference counts");
   }
 
+  int old_reflinks = buf->mmap_reflinks;
   buf->mmap_reflinks--;
+
+  LOG_INFO(buf, "buffer_consumed by %s: reflinks %d->%d, enqueued=%d",
+    who, old_reflinks, buf->mmap_reflinks, buf->enqueued);
 
   if (!buf->enqueued && buf->mmap_reflinks == 0) {
     LOG_DEBUG(buf, "Queuing buffer... used=%zu length=%zu (linked=%s) by %s",
@@ -85,6 +89,14 @@ buffer_t *buffer_list_find_slot(buffer_list_t *buf_list)
     if (!buf_list->bufs[i]->enqueued && buf_list->bufs[i]->mmap_reflinks == 1) {
       buf = buf_list->bufs[i];
       break;
+    }
+  }
+
+  if (!buf) {
+    LOG_INFO(buf_list, "find_slot: no slot found. Buffer states:");
+    for (int i = 0; i < buf_list->nbufs; i++) {
+      LOG_INFO(buf_list, "  buf[%d]: enqueued=%d, mmap_reflinks=%d",
+        i, buf_list->bufs[i]->enqueued, buf_list->bufs[i]->mmap_reflinks);
     }
   }
 
@@ -232,6 +244,9 @@ int buffer_list_pollfd(buffer_list_t *buf_list, struct pollfd *pollfd, bool can_
 
 void buffer_list_clear_queue(buffer_list_t *buf_list)
 {
+  if (buf_list->n_queued_bufs > 0) {
+    LOG_INFO(buf_list, "clear_queue: clearing %d buffers", buf_list->n_queued_bufs);
+  }
   ARRAY_FOREACH(buffer_t*, queued_buf, buf_list->queued_bufs, buf_list->n_queued_bufs) {
     buffer_consumed(*queued_buf, "clear queue");
     *queued_buf = NULL;
@@ -243,13 +258,18 @@ bool buffer_list_push_to_queue(buffer_list_t *buf_list, buffer_t *dma_buf, int m
 {
   max_bufs = MIN(max_bufs ? max_bufs : MAX_BUFFER_QUEUE, MAX_BUFFER_QUEUE);
 
-  if (buf_list->dev->paused)
+  if (buf_list->dev->paused) {
+    LOG_INFO(buf_list, "push_to_queue: device paused, ignoring");
     return true;
-  if (buf_list->n_queued_bufs >= max_bufs)
+  }
+  if (buf_list->n_queued_bufs >= max_bufs) {
+    LOG_INFO(buf_list, "push_to_queue: queue full (%d/%d)", buf_list->n_queued_bufs, max_bufs);
     return false;
+  }
 
   buffer_use(dma_buf);
   buf_list->queued_bufs[buf_list->n_queued_bufs++] = dma_buf;
+  LOG_INFO(buf_list, "push_to_queue: added buffer, queue now has %d items", buf_list->n_queued_bufs);
   return true;
 }
 

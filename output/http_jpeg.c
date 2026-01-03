@@ -90,6 +90,9 @@ int http_stream_buf_part(buffer_lock_t *buf_lock, buffer_t *buf, int frame, FILE
 
 void http_stream(http_worker_t *worker, FILE *stream)
 {
+  LOG_INFO(NULL, "stream_lock: HTTP stream request received (buf=%p, refs=%d, counter=%d, buf_list=%p)",
+    stream_lock.buf, stream_lock.refs, stream_lock.counter, stream_lock.buf_list);
+  
   int n = buffer_lock_write_loop(&stream_lock, 0, 0, (buffer_write_fn)http_stream_buf_part, stream);
 
   if (n == 0) {

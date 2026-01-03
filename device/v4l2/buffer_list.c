@@ -179,7 +179,13 @@ error:
 int v4l2_buffer_list_set_stream(buffer_list_t *buf_list, bool do_on)
 {
 	enum v4l2_buf_type type = buf_list->v4l2->type;
-  ERR_IOCTL(buf_list, buf_list->v4l2->dev_fd, do_on ? VIDIOC_STREAMON : VIDIOC_STREAMOFF, &type, "Cannot set streaming state");
+  int ioctl_ret = ioctl(buf_list->v4l2->dev_fd, do_on ? VIDIOC_STREAMON : VIDIOC_STREAMOFF, &type);
+  if (ioctl_ret < 0) {
+    LOG_ERROR(buf_list, "V4L2 set_stream(%s) FAILED: errno=%d (%s)",
+      do_on ? "ON" : "OFF", errno, strerror(errno));
+    goto error;
+  }
+  LOG_INFO(buf_list, "V4L2 set_stream(%s) OK", do_on ? "ON" : "OFF");
 
   if (!do_on) {
     // forcefully dequeue all buffers
@@ -196,6 +202,7 @@ int v4l2_buffer_list_set_stream(buffer_list_t *buf_list, bool do_on)
 
       buf->enqueued = false;
       buf->mmap_reflinks = 1;
+      LOG_INFO(buf_list, "V4L2: Reset buffer[%d] to enqueued=false, mmap_reflinks=1", i);
     }
   }
 

@@ -34,8 +34,13 @@ static bool link_needs_buffer_by_callbacks(link_t *link)
       needs = true;
     }
 
-    if (link->callbacks[j].buf_lock && buffer_lock_needs_buffer(link->callbacks[j].buf_lock)) {
-      needs = true;
+    if (link->callbacks[j].buf_lock) {
+      bool buf_lock_needs = buffer_lock_needs_buffer(link->callbacks[j].buf_lock);
+      if (buf_lock_needs) {
+        LOG_INFO(link->capture_list, "link_needs_buffer: %s needs buffer (refs=%d)",
+          link->callbacks[j].buf_lock->name, link->callbacks[j].buf_lock->refs);
+        needs = true;
+      }
     }
   }
 
@@ -51,6 +56,7 @@ static bool link_needs_buffer_by_sinks(link_t *link)
 
     if (!output_list->dev->paused) {
       needs = true;
+      LOG_INFO(link->capture_list, "link_needs_buffer_by_sinks: %s not paused", output_list->name);
     }
   }
 
@@ -74,38 +80,70 @@ static void links_process_paused(link_t *all_links, bool force_active)
     buffer_list_t *capture_list = link->capture_list;
 
     bool paused = true;
+    bool needs_by_callbacks = link_needs_buffer_by_callbacks(link);
+    bool needs_by_sinks = link_needs_buffer_by_sinks(link);
 
     if (force_active) {
       paused = false;
     }
 
-    if (link_needs_buffer_by_callbacks(link)) {
+    if (needs_by_callbacks) {
       paused = false;
     }
 
-    if (link_needs_buffer_by_sinks(link)) {
+    if (needs_by_sinks) {
       paused = false;
     }
 
+    bool was_paused = capture_list->dev->paused;
     capture_list->dev->paused = paused;
+    
+    // Log state changes
+    if (was_paused != paused) {
+      LOG_INFO(capture_list, "Paused state changed: %d -> %d (force=%d, needs_callbacks=%d, needs_sinks=%d)",
+        was_paused, paused, force_active, needs_by_callbacks, needs_by_sinks);
+    }
   }
 }
 
-static bool links_enqueue_capture_buffers(buffer_list_t *capture_list, int *timeout_next_ms)
+static bool links_enqueue_capture_buffers(link_t *link, int *timeout_next_ms)
 {
+  buffer_list_t *capture_list = link->capture_list;
   buffer_t *capture_buf = NULL;
   uint64_t now_us = get_monotonic_time_us(NULL, NULL);
 
   if (now_us - capture_list->last_enqueued_us > STALE_TIMEOUT_US && capture_list->dev->output_list == NULL) {
-    LOG_INFO(capture_list, "Stale detected. Restarting streaming...");
+    LOG_INFO(capture_list, "Stale detected. Restarting streaming... (n_callbacks=%d, n_output_lists=%d, last_enqueued_ago_ms=%llu)",
+      link->n_callbacks, link->n_output_lists,
+      (unsigned long long)(now_us - capture_list->last_enqueued_us) / 1000);
+    
+    // DEBUG: Log which buffer_locks are connected to this link
+    for (int j = 0; j < link->n_callbacks; j++) {
+      if (link->callbacks[j].buf_lock) {
+        LOG_INFO(capture_list, "  -> Connected buffer_lock: %s (refs=%d, counter=%d)",
+          link->callbacks[j].buf_lock->name,
+          link->callbacks[j].buf_lock->refs,
+          link->callbacks[j].buf_lock->counter);
+      }
+    }
+    
     buffer_list_set_stream(capture_list, false);
     buffer_list_set_stream(capture_list, true);
+    
+    // DEBUG: Check buffer state after restart
+    int enqueued_after = buffer_list_count_enqueued(capture_list);
+    buffer_t *slot = buffer_list_find_slot(capture_list);
+    LOG_INFO(capture_list, "After restart: enqueued=%d/%d, has_slot=%d, output_list=%s",
+      enqueued_after, capture_list->nbufs, slot != NULL,
+      capture_list->dev->output_list ? capture_list->dev->output_list->name : "none");
   }
 
   // skip if all enqueued
   capture_buf = buffer_list_find_slot(capture_list);
-  if (capture_buf == NULL)
+  if (capture_buf == NULL) {
+    LOG_INFO(capture_list, "No slot available (all buffers busy or enqueued)");
     return false;
+  }
 
   // skip if trying to enqueue to fast
   if (capture_list->fmt.interval_us > 0 && now_us - capture_list->last_enqueued_us < capture_list->fmt.interval_us) {
@@ -132,10 +170,15 @@ static bool links_enqueue_capture_buffers(buffer_list_t *capture_list, int *time
   if (!output_list) {
     // limit amount of buffers enqueued by camera
     if (buffer_list_count_enqueued(capture_list) >= MAX_CAPTURED_ON_CAMERA) {
+      LOG_INFO(capture_list, "No enqueue: no output_list, already at max (%d)", MAX_CAPTURED_ON_CAMERA);
       return false;
     }
     
+    LOG_INFO(capture_list, "Enqueueing buffer (no output_list path), enqueued_before=%d",
+      buffer_list_count_enqueued(capture_list));
     buffer_consumed(capture_buf, "enqueued");
+    LOG_INFO(capture_list, "After buffer_consumed: enqueued=%d",
+      buffer_list_count_enqueued(capture_list));
     if (capture_list->fmt.interval_us > 0)
       return false;
     return true;
@@ -143,11 +186,13 @@ static bool links_enqueue_capture_buffers(buffer_list_t *capture_list, int *time
 
   // limit amount of buffers enqueued by m2m
   if (buffer_list_count_enqueued(output_list) >= MAX_CAPTURED_ON_M2M) {
+    LOG_INFO(capture_list, "No enqueue: output_list enqueued >= MAX_CAPTURED_ON_M2M (%d)", MAX_CAPTURED_ON_M2M);
     return false;
   }
 
   // try to find matching output slot, ignore if not present
   if (!buffer_list_find_slot(output_list)) {
+    LOG_INFO(capture_list, "No enqueue: no slot in output_list %s", output_list->name);
     return false;
   }
 
@@ -156,6 +201,7 @@ static bool links_enqueue_capture_buffers(buffer_list_t *capture_list, int *time
   // try to look for output, if there's a matching capture to be consumed
   buffer_t *queued_capture_for_output_buf = buffer_list_pop_from_queue(output_list);
   if (queued_capture_for_output_buf) {
+    LOG_INFO(capture_list, "Got queued capture for output, enqueueing...");
     // then push a capture from source into output for this capture
     if (buffer_list_enqueue(output_list, queued_capture_for_output_buf)) {
       buffer_consumed(capture_buf, "enqueued");
@@ -167,6 +213,8 @@ static bool links_enqueue_capture_buffers(buffer_list_t *capture_list, int *time
 
     // release this buffer
     buffer_consumed(queued_capture_for_output_buf, "from-queue");
+  } else {
+    LOG_INFO(capture_list, "No enqueue: no queued capture in output_list %s (queue empty)", output_list->name);
   }
 
   return can_enqueue;
@@ -181,7 +229,7 @@ static void links_process_capture_buffers(link_t *all_links, int *timeout_next_m
     if (capture_list->dev->paused)
       continue;
 
-    while (links_enqueue_capture_buffers(capture_list, timeout_next_ms)) {
+    while (links_enqueue_capture_buffers(link, timeout_next_ms)) {
     }
   }
 }
@@ -244,6 +292,9 @@ static int links_enqueue_from_capture_list(buffer_list_t *capture_list, link_t *
     LOG_ERROR(capture_list, "No buffer dequeued from capture_list?");
   }
 
+  LOG_INFO(capture_list, "Frame dequeued (n_callbacks=%d, n_output_lists=%d, is_keyframe=%d)",
+    link->n_callbacks, link->n_output_lists, buf->flags.is_keyframe);
+
   if (buf->flags.is_last) {
     LOG_INFO(buf, "Received last buffer. Restarting streaming...");
     buffer_list_set_stream(capture_list, false);
@@ -264,12 +315,17 @@ static int links_enqueue_from_capture_list(buffer_list_t *capture_list, link_t *
 
   for (int j = 0; j < link->n_output_lists; j++) {
     if (link->output_lists[j]->dev->paused) {
+      LOG_INFO(capture_list, "Skipping output %s: device paused", link->output_lists[j]->name);
       continue;
     }
     if (buf->flags.is_keyframe) {
       buffer_list_clear_queue(link->output_lists[j]);
     }
-    if (!buffer_list_push_to_queue(link->output_lists[j], buf, max_bufs_queued)) {
+    bool pushed = buffer_list_push_to_queue(link->output_lists[j], buf, max_bufs_queued);
+    LOG_INFO(capture_list, "Push to %s: %s (queue_size=%d)",
+      link->output_lists[j]->name, pushed ? "OK" : "FAILED/FULL",
+      link->output_lists[j]->n_queued_bufs);
+    if (!pushed) {
       dropped = true;
     }
   }
@@ -284,6 +340,8 @@ static int links_enqueue_from_capture_list(buffer_list_t *capture_list, link_t *
     }
 
     if (link->callbacks[j].buf_lock) {
+      LOG_INFO(capture_list, "Delivering frame to buffer_lock %s (refs=%d)",
+        link->callbacks[j].buf_lock->name, link->callbacks[j].buf_lock->refs);
       buffer_lock_capture(link->callbacks[j].buf_lock, buf);
     }
   }
@@ -337,7 +395,23 @@ static int links_step(link_t *all_links, bool force_active, int timeout_now_ms, 
   print_pollfds(pool.fds, n);
 
   if (ret < 0 && errno != EINTR) {
+    LOG_INFO(NULL, "poll() failed: errno=%d (%s)", errno, strerror(errno));
     return errno;
+  }
+
+  // Log poll results when something happens
+  if (ret > 0) {
+    for (int i = 0; i < n; i++) {
+      if (pool.fds[i].revents) {
+        buffer_list_t *buf_list = pool.capture_lists[i] ? pool.capture_lists[i] : pool.output_lists[i];
+        LOG_DEBUG(buf_list, "poll returned: revents=%s%s%s%s (fd=%d)",
+          pool.fds[i].revents & POLLIN ? "IN " : "",
+          pool.fds[i].revents & POLLOUT ? "OUT " : "",
+          pool.fds[i].revents & POLLHUP ? "HUP " : "",
+          pool.fds[i].revents & POLLERR ? "ERR " : "",
+          pool.fds[i].fd);
+      }
+    }
   }
 
   for (int i = 0; i < n; i++) {

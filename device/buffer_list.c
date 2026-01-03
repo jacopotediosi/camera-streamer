@@ -139,6 +139,13 @@ int buffer_list_set_stream(buffer_list_t *buf_list, bool do_on)
     return 0;
   }
 
+  // Log buffer states before change
+  LOG_INFO(buf_list, "set_stream(%s) called. Buffer states before:", do_on ? "ON" : "OFF");
+  for (int i = 0; i < buf_list->nbufs; i++) {
+    LOG_INFO(buf_list, "  buf[%d]: enqueued=%d, mmap_reflinks=%d",
+      i, buf_list->bufs[i]->enqueued, buf_list->bufs[i]->mmap_reflinks);
+  }
+
   if (buf_list->dev->hw->buffer_list_set_stream(buf_list, do_on) < 0) {
     goto error;
   }
@@ -152,6 +159,14 @@ int buffer_list_set_stream(buffer_list_t *buf_list, bool do_on)
 
   int enqueued = buffer_list_count_enqueued(buf_list);
   LOG_INFO(buf_list, "Streaming %s... Was %d of %d enqueud", do_on ? "started" : "stopped", enqueued, buf_list->nbufs);
+  
+  // Log buffer states after change
+  LOG_INFO(buf_list, "Buffer states after:");
+  for (int i = 0; i < buf_list->nbufs; i++) {
+    LOG_INFO(buf_list, "  buf[%d]: enqueued=%d, mmap_reflinks=%d",
+      i, buf_list->bufs[i]->enqueued, buf_list->bufs[i]->mmap_reflinks);
+  }
+  
   return 0;
 
 error:

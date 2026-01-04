@@ -9,6 +9,9 @@ extern struct buffer_lock_s snapshot_lock;
 extern struct buffer_lock_s stream_lock;
 extern struct buffer_lock_s video_lock;
 
+// Placeholders
+void output_init_placeholders(void);
+
 // M-JPEG
 void http_snapshot(struct http_worker_s *worker, FILE *stream);
 void http_stream(struct http_worker_s *worker, FILE *stream);

@@ -2,6 +2,7 @@
 #include "util/opts/opts.h"
 #include "util/opts/log.h"
 #include "device/camera/camera.h"
+#include "output/output.h"
 #include "output/rtsp/rtsp.h"
 #include "output/webrtc/webrtc.h"
 #include "version.h"
@@ -79,6 +80,9 @@ int main(int argc, char *argv[])
     goto error;
   }
 
+  // Initialize placeholder images for when camera is unavailable
+  output_init_placeholders();
+
   if (rtsp_options.port > 0 && rtsp_server(&rtsp_options) < 0) {
     goto error;
   }
@@ -94,12 +98,10 @@ int main(int argc, char *argv[])
       camera_close(&camera);
     }
 
-    if (camera_options.auto_reconnect > 0) {
-      LOG_INFO(NULL, "Automatically reconnecting in %d seconds...", camera_options.auto_reconnect);
-      sleep(camera_options.auto_reconnect);
-    } else {
-      break;
-    }
+    // Always keep server running with placeholder, retry reconnecting
+    unsigned reconnect_delay = camera_options.auto_reconnect > 0 ? camera_options.auto_reconnect : 5;
+    LOG_INFO(NULL, "Camera disconnected. Showing placeholder. Retrying in %d seconds...", reconnect_delay);
+    sleep(reconnect_delay);
   }
 
 error:

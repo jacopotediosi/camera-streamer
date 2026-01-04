@@ -3,6 +3,9 @@
 #include "device/buffer.h"
 #include "util/opts/log.h"
 
+#include <stdlib.h>
+#include <string.h>
+
 bool buffer_lock_is_used(buffer_lock_t *buf_lock)
 {
   int refs = 0;
@@ -107,10 +110,25 @@ buffer_t *buffer_lock_get(buffer_lock_t *buf_lock, int timeout_ms, int *counter)
   if (*counter == buf_lock->counter || !buf_lock->buf) {
     int ret = pthread_cond_timedwait(&buf_lock->cond_wait, &buf_lock->lock, &timeout);
     if (ret == ETIMEDOUT) {
+      // Return placeholder if available
+      if (buf_lock->placeholder) {
+        buf = buf_lock->placeholder;
+        // Update captured_time_us so placeholder is not filtered as stale
+        buf->captured_time_us = get_monotonic_time_us(NULL, NULL);
+        buffer_use(buf);
+      }
       goto ret;
     } else if (ret < 0) {
       goto ret;
     }
+  }
+
+  // If still no buffer available, try placeholder
+  if (!buf_lock->buf && buf_lock->placeholder) {
+    buf = buf_lock->placeholder;
+    buf->captured_time_us = get_monotonic_time_us(NULL, NULL);
+    buffer_use(buf);
+    goto ret;
   }
 
   buf = buf_lock->buf;
@@ -194,4 +212,32 @@ bool buffer_lock_register_notify_buffer(buffer_lock_t *buf_lock, buffer_lock_not
   pthread_mutex_unlock(&buf_lock->lock);
 
   return ret;
+}
+
+void buffer_lock_set_placeholder(buffer_lock_t *buf_lock, void *data, size_t size, bool is_keyframe)
+{
+  // Allocate a static placeholder buffer
+  buffer_t *placeholder = calloc(1, sizeof(buffer_t));
+  if (!placeholder) {
+    return;
+  }
+
+  placeholder->name = strdup("placeholder");
+  placeholder->start = malloc(size);
+  if (!placeholder->start) {
+    free(placeholder->name);
+    free(placeholder);
+    return;
+  }
+  
+  memcpy(placeholder->start, data, size);
+  placeholder->used = size;
+  placeholder->length = size;
+  placeholder->mmap_reflinks = 1; // Keep it alive
+  placeholder->flags.is_keyframe = is_keyframe;
+  placeholder->captured_time_us = get_monotonic_time_us(NULL, NULL);
+
+  pthread_mutex_lock(&buf_lock->lock);
+  buf_lock->placeholder = placeholder;
+  pthread_mutex_unlock(&buf_lock->lock);
 }

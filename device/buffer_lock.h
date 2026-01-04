@@ -20,6 +20,9 @@ typedef struct buffer_lock_s {
   buffer_lock_check_streaming check_streaming[BUFFER_LOCK_MAX_CALLBACKS];
   buffer_lock_notify_buffer notify_buffer[BUFFER_LOCK_MAX_CALLBACKS];
 
+  // Placeholder buffer to return when no frames available
+  buffer_t *placeholder;
+
   // private
   pthread_mutex_t lock;
   pthread_cond_t cond_wait;
@@ -55,3 +58,4 @@ bool buffer_lock_is_used(buffer_lock_t *buf_lock);
 int buffer_lock_write_loop(buffer_lock_t *buf_lock, int nframes, unsigned timeout_ms, buffer_write_fn fn, void *data);
 bool buffer_lock_register_check_streaming(buffer_lock_t *buf_lock, buffer_lock_check_streaming check_streaming);
 bool buffer_lock_register_notify_buffer(buffer_lock_t *buf_lock, buffer_lock_notify_buffer notify_buffer);
+void buffer_lock_set_placeholder(buffer_lock_t *buf_lock, void *data, size_t size, bool is_keyframe);
